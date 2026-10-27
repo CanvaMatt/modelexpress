@@ -586,6 +586,16 @@ class VllmAdapter(EngineAdapter):
         from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
         with capture_tensor_attrs(self.accelerator_backend):
+            # Mirrors vLLM's BaseModelLoader.load_model: online quantization
+            # leaves layers that never received all their elements (padding,
+            # deferred attention, absent checkpoint weights, every layer on an
+            # RDMA target) on the meta device until this materializes them.
+            if _has_online_quant(result.model):
+                from vllm.model_executor.model_loader.reload import (
+                    finalize_layerwise_processing,
+                )
+
+                finalize_layerwise_processing(result.model, self.model_config)
             process_weights_after_loading(
                 result.model,
                 self.model_config,
@@ -685,6 +695,15 @@ class VllmAdapter(EngineAdapter):
             tp_size > 1
             and envs.MX_MS_DISTRIBUTED
         )
+
+
+def _has_online_quant(model: torch.nn.Module) -> bool:
+    """Match vLLM's private base_loader._has_online_quant check."""
+    return any(
+        getattr(getattr(module, "quant_method", None), "uses_meta_device", False)
+        is True
+        for module in model.modules()
+    )
 
 
 def _set_load_config_extra_config(load_config, extra_config: dict) -> None:
