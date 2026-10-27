@@ -840,6 +840,56 @@ def _stub_vllm_process_weights_after_loading(monkeypatch, process_fn) -> None:
     monkeypatch.setitem(sys.modules, utils.__name__, utils)
 
 
+def _stub_vllm_finalize_layerwise_processing(monkeypatch, finalize_fn) -> None:
+    reload = ModuleType("vllm.model_executor.model_loader.reload")
+    reload.finalize_layerwise_processing = finalize_fn
+    monkeypatch.setitem(sys.modules, reload.__name__, reload)
+
+
+class _OnlineQuantModel(nn.Module):
+    def __init__(self, *, uses_meta_device: bool):
+        super().__init__()
+        self.proj = nn.Module()
+        self.proj.quant_method = SimpleNamespace(uses_meta_device=uses_meta_device)
+
+
+def test_post_load_finalizes_online_quant_layers_before_processing(monkeypatch):
+    events = []
+    model = _OnlineQuantModel(uses_meta_device=True)
+    model_config = _model_config()
+    _stub_vllm_process_weights_after_loading(
+        monkeypatch,
+        lambda model, model_config, target_device: events.append("process"),
+    )
+    _stub_vllm_finalize_layerwise_processing(
+        monkeypatch,
+        lambda finalized, config: events.append(("finalize", finalized, config)),
+    )
+    adapter = VllmAdapter(_context_config(load_device="cpu"), model_config)
+
+    adapter.after_weight_iter_load(LoadResult(value=model, model=model))
+
+    assert events == [("finalize", model, model_config), "process"]
+
+
+def test_post_load_skips_layerwise_finalize_without_online_quant(monkeypatch):
+    events = []
+    model = _OnlineQuantModel(uses_meta_device=False)
+    _stub_vllm_process_weights_after_loading(
+        monkeypatch,
+        lambda model, model_config, target_device: events.append("process"),
+    )
+    _stub_vllm_finalize_layerwise_processing(
+        monkeypatch,
+        lambda finalized, config: events.append("finalize"),
+    )
+    adapter = VllmAdapter(_context_config(load_device="cpu"), _model_config())
+
+    adapter.after_native_load(LoadResult(value=model, model=model))
+
+    assert events == ["process"]
+
+
 def _stub_metadata_client(monkeypatch) -> None:
     monkeypatch.setattr(
         "modelexpress.engines.vllm.adapter.create_metadata_client",
